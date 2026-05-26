@@ -20,11 +20,6 @@ int main(void)
         assert(sdslen(s2) == 5);
         assert(strcmp(s2, "hello") == 0);
         printf("[PASS] sdsdup (same arena)\n");
-
-        sdsfree(s1);
-        sdsfree(s2);
-        /* sdsfree is no-op in arena mode, just test it doesn't crash */
-        printf("[PASS] sdsfree no-op in arena mode\n");
     }
 
     /* 2. sdsempty + sdscat */

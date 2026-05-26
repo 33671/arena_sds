@@ -13,7 +13,6 @@ freed in bulk — there is no per-string free.
 | `sds sdsnewlen(const void *init, size_t len)` | `sds sdsnewlen(Arena *a, const void *init, size_t len)` |
 | `sds sdsempty(void)` | `sds sdsempty(Arena *a)` |
 | `sds sdsdup(const sds s)` | `sds sdsdup(const sds s)` — unchanged, duplicates into the same arena |
-| `void sdsfree(sds s)` | **no-op** — arena doesn't support individual free |
 | `sds sdsfromlonglong(long long v)` | `sds sdsfromlonglong(Arena *a, long long v)` |
 | `sds *sdssplitlen(...)` | `sds *sdssplitlen(Arena *a, ...)` |
 | `sds *sdssplitargs(...)` | `sds *sdssplitargs(Arena *a, ...)` |
@@ -41,8 +40,7 @@ arena_free(&a);                 // free everything, release all memory
 
 Key points:
 - An `Arena` is a bump allocator: allocations are laid out contiguously in
-  64 KB *Regions*. Freeing individual strings is impossible by design —
-  `sdsfree()` is a no-op.
+  64 KB *Regions*. Freeing individual strings is impossible by design.
 - `arena_reset()` rewinds the arena to empty while keeping allocated Regions,
   so the next batch of strings reuses the same memory.
 - `arena_free()` releases all Regions back to the OS.
@@ -190,7 +188,7 @@ The above small program already shows a few important things about SDS:
 
 * SDS strings are created via the `sdsnew()` function (which takes an `Arena*`), or other similar functions that we'll see in a moment.
 * SDS strings can be passed to `printf()` like any other C string.
-* SDS strings are freed in bulk via `arena_reset()` or `arena_free()` — `sdsfree()` is a no-op in this fork.
+* SDS strings are freed in bulk via `arena_reset()` or `arena_free()`.
 
 Creating SDS strings
 ---
@@ -284,16 +282,14 @@ like a normal C string.
 Destroying strings
 ---
 
-```c
-void sdsfree(sds s);
-```
-
-In this fork `sdsfree` is a **no-op**: the arena allocator cannot free
+There is no `sdsfree` in this fork. The arena allocator cannot free
 individual strings out of order. All strings in an arena are freed in bulk
 by `arena_reset()` or `arena_free()`.
 
-The function still exists for API compatibility and safely does nothing when
-called (including when `NULL` is passed).
+```c
+arena_reset(&a);   // rewind: reuse memory for next batch
+arena_free(&a);    // release all memory back to OS
+```
 
 Concatenating strings
 ---

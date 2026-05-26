@@ -42,6 +42,11 @@
 #define ARENA_IMPLEMENTATION
 #include "arena.h"
 
+/* sdsfree is a no-op in arena mode — the allocator cannot free
+ * individual strings.  Kept as a macro so internal cleanup paths
+ * compile away to nothing. */
+#define sdsfree(s) ((void)(s))
+
 /* Internal helper: extract Arena* from the sds header's _arena field. */
 static inline Arena *sdsGetArena(const sds s) {
     unsigned char flags = s[-1];
@@ -198,12 +203,7 @@ sds sdsdup(const sds s) {
  *      arena_free() once when the entire workload is done.
  *
  * In short: the unit of reclamation with arena is the Arena itself, not
- * individual strings. sdsfree becomes a semantic no-op that exists solely
- * to keep the API uniform between arena and non-arena builds. */
-void sdsfree(sds s) {
-    if (s == NULL) return;
-}
-
+ * individual strings. Use arena_reset() or arena_free() to reclaim. */
 /* Set the sds string length to the length as obtained with strlen(), so
  * considering as content only up to the first null term character.
  *
