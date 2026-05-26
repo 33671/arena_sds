@@ -323,6 +323,24 @@ void *arena_alloc(Arena *a, size_t size_bytes)
 void *arena_realloc(Arena *a, void *oldptr, size_t oldsz, size_t newsz)
 {
     if (newsz <= oldsz) return oldptr;
+
+    /* If oldptr is the very last allocation in the current region,
+     * we can just bump the count without allocating new memory. */
+    if (a->end != NULL) {
+        size_t old_words = (oldsz + sizeof(uintptr_t) - 1) / sizeof(uintptr_t);
+        uintptr_t *old_end = (uintptr_t *)oldptr + old_words;
+        uintptr_t *region_end = &a->end->data[a->end->count];
+        if (old_end == region_end) {
+            size_t new_words = (newsz + sizeof(uintptr_t) - 1) / sizeof(uintptr_t);
+            size_t new_count = a->end->count - old_words + new_words;
+            if (new_count <= a->end->capacity) {
+                a->end->count = new_count;
+                return oldptr;
+            }
+            /* Not enough room; fall through to alloc+copy below. */
+        }
+    }
+
     void *newptr = arena_alloc(a, newsz);
     char *newptr_char = (char*)newptr;
     char *oldptr_char = (char*)oldptr;
@@ -439,6 +457,7 @@ void arena_free(Arena *a)
 }
 
 void arena_trim(Arena *a){
+    if (a->end == NULL) return;
     Region *r = a->end->next;
     while (r) {
         Region *r0 = r;

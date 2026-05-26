@@ -37,17 +37,12 @@
  * the include of your alternate allocator if needed (not needed in order
  * to use the default libc allocator).
  *
- * When SDS_USE_ARENA is defined, SDS uses Arena* pointers embedded in
- * each string's header. The macros below become no-ops — all allocation
+ * SDS uses Arena* pointers embedded in each string's header. All allocation
  * goes through the arena API directly inside sds.c. */
 
-#ifdef SDS_USE_ARENA
 #include <stdlib.h> /* for malloc/free used by temporary buffers */
-#define s_malloc(sz)  ((void)(sz), NULL) /* should not be called in arena mode */
+/* s_malloc / s_realloc / s_free are no-ops — all SDS allocations go
+ * through the arena API. They exist only for API compatibility. */
+#define s_malloc(sz)  ((void)(sz), NULL)
 #define s_realloc(p,sz) ((void)(p), (void)(sz), NULL)
 #define s_free(p)     ((void)(p))
-#else
-#define s_malloc malloc
-#define s_realloc realloc
-#define s_free free
-#endif

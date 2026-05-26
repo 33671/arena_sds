@@ -213,6 +213,155 @@ int main(void)
         printf("[PASS] sdstolower / sdstoupper\n");
     }
 
+    /* 19. arena_realloc: last-allocation in-place extension */
+    {
+        Arena ar = {0};
+
+        /* Allocate a block; being the only allocation it's also the last */
+        void *p1 = arena_alloc(&ar, 64);
+        assert(p1 != NULL);
+        size_t count_after_p1 = ar.end->count;
+
+        /* Realloc p1 (the last allocation) to a larger size */
+        void *p2 = arena_realloc(&ar, p1, 64, 128);
+        /* Should return the same pointer — no copy needed */
+        assert(p1 == p2);
+        /* Count should increase by only the delta, not old+new */
+        size_t old_words = (64  + sizeof(uintptr_t) - 1) / sizeof(uintptr_t);
+        size_t new_words = (128 + sizeof(uintptr_t) - 1) / sizeof(uintptr_t);
+        assert(ar.end->count == count_after_p1 - old_words + new_words);
+        printf("[PASS] arena_realloc last-alloc extends in-place\n");
+
+        /* Now allocate a second block so p2 is no longer the last */
+        void *p3 = arena_alloc(&ar, 32);
+        assert(p3 != NULL);
+
+        /* Realloc p2 (now NOT the last) — must alloc+copy */
+        void *p4 = arena_realloc(&ar, p2, 128, 256);
+        assert(p4 != p2);   /* different pointer */
+        assert(p4 != NULL);
+        /* Verify old data was copied */
+        assert(memcmp(p4, p1, 64) == 0);
+        printf("[PASS] arena_realloc non-last alloc+copy\n");
+
+        /* Realloc with same size — should be no-op */
+        void *p5 = arena_realloc(&ar, p4, 256, 256);
+        assert(p5 == p4);
+        printf("[PASS] arena_realloc same-size no-op\n");
+
+        /* Realloc with smaller size — should be no-op */
+        void *p6 = arena_realloc(&ar, p4, 256, 100);
+        assert(p6 == p4);
+        printf("[PASS] arena_realloc shrink no-op\n");
+
+        arena_free(&ar);
+    }
+
+    /* ── Tests for _arena cross-type write fix ─────────────────── */
+    /* These verify that sdsMakeRoomFor() and sdsRemoveFreeSpace()
+     * write the _arena pointer at the correct offset for the
+     * *target* header type, not always at sdshdr8's offset.
+     *
+     * The bug was: ((struct sdshdr8 *)newsh)->_arena = (void*)a
+     * which writes at offset 2. But different header types have
+     * _arena at different offsets:
+     *   sdshdr5: 0   sdshdr8: 2   sdshdr16: 4   sdshdr32: 8
+     *
+     * Each sub-test does a cross-type operation then immediately
+     * calls sdscat() which internally calls sdsGetArena() — if
+     * _arena was written at the wrong offset, the subsequent
+     * arena access will read garbage and crash or corrupt. */
+    {
+        Arena ar = {0};
+
+        /* 20. sdsMakeRoomFor: cross-type 5→16 */
+        {
+            sds s = sdsnewlen(&ar, "ab", 2);       /* type 5 (2 < 32) */
+            s = sdsMakeRoomFor(s, 300);            /* newlen=604 → type 16 */
+            /* Verify arena pointer is intact by appending */
+            s = sdscat(s, "cd");
+            assert(sdslen(s) == 4);
+            assert(strcmp(s, "abcd") == 0);
+            printf("[PASS] sdsMakeRoomFor cross-type 5→16 + arena verify\n");
+        }
+
+        /* 21. sdsMakeRoomFor: cross-type 8→16 */
+        {
+            char init[120];
+            memset(init, 'x', 119);
+            init[119] = '\0';
+            sds s = sdsnewlen(&ar, init, 119);     /* type 8 (119 < 256, >= 32) */
+            s = sdsMakeRoomFor(s, 200);            /* newlen=638 → type 16 */
+            s = sdscat(s, "YY");
+            assert(sdslen(s) == 121);
+            assert(memcmp(s + 119, "YY", 2) == 0);
+            printf("[PASS] sdsMakeRoomFor cross-type 8→16 + arena verify\n");
+        }
+
+        /* 22. sdsMakeRoomFor: cross-type 5→32 */
+        {
+            sds s = sdsnewlen(&ar, "xy", 2);       /* type 5 */
+            s = sdsMakeRoomFor(s, 40000);          /* newlen=80004 → type 32 */
+            /* Verify arena pointer is intact */
+            s = sdscat(s, "z");
+            assert(sdslen(s) == 3);
+            assert(strcmp(s, "xyz") == 0);
+            printf("[PASS] sdsMakeRoomFor cross-type 5→32 + arena verify\n");
+        }
+
+        /* 23. sdsRemoveFreeSpace: cross-type 16→5 */
+        {
+            sds s = sdsnewlen(&ar, "hi", 2);       /* type 5 */
+            s = sdsMakeRoomFor(s, 300);            /* → type 16, alloc=604 */
+            s = sdsRemoveFreeSpace(s);             /* len=2 → type 5, cross! */
+            /* Verify arena pointer by appending (sdscat → sdsGetArena) */
+            s = sdscat(s, "!!");
+            assert(sdslen(s) == 4);
+            assert(strcmp(s, "hi!!") == 0);
+            printf("[PASS] sdsRemoveFreeSpace cross-type 16→5 + arena verify\n");
+        }
+
+        /* 24. sdsRemoveFreeSpace: cross-type 16→8 */
+        {
+            /* Create a 50-byte content string so shrink targets type 8 */
+            char content[64];
+            memset(content, 'A', 50);
+            content[50] = '\0';
+            sds s = sdsnewlen(&ar, content, 50);   /* type 8 (50 >= 32) */
+            s = sdsMakeRoomFor(s, 400);            /* → type 16, alloc big */
+            s = sdsRemoveFreeSpace(s);             /* len=50 → type 8, cross! */
+            /* Verify arena pointer */
+            s = sdscat(s, "B");
+            assert(sdslen(s) == 51);
+            assert(s[50] == 'B');
+            printf("[PASS] sdsRemoveFreeSpace cross-type 16→8 + arena verify\n");
+        }
+
+        /* 25. sdsRemoveFreeSpace: cross-type 32→5 (covers SDS_TYPE_5 case) */
+        {
+            sds s = sdsnewlen(&ar, "ok", 2);       /* type 5 */
+            s = sdsMakeRoomFor(s, 50000);          /* → type 32 */
+            s = sdsRemoveFreeSpace(s);             /* len=2 → type 5, cross! */
+            s = sdscat(s, "!");
+            assert(sdslen(s) == 3);
+            assert(strcmp(s, "ok!") == 0);
+            printf("[PASS] sdsRemoveFreeSpace cross-type 32→5 + arena verify\n");
+        }
+
+        /* 26. Chained cross-type: sdsMakeRoomFor then sdsRemoveFreeSpace */
+        {
+            sds s = sdsnewlen(&ar, "go", 2);       /* type 5 */
+            s = sdsMakeRoomFor(s, 500);            /* 5→16 */
+            s = sdscat(s, "lang");                 /* uses arena */
+            s = sdsRemoveFreeSpace(s);             /* 16→5 (len=5, <32) */
+            s = sdscat(s, "pher");                 /* uses arena again */
+            assert(strcmp(s, "golangpher") == 0);
+            printf("[PASS] chained cross-type: MakeRoomFor + RemoveFreeSpace\n");
+        }
+
+        arena_free(&ar);
+    }
+
     /* Clean up */
     arena_free(&a);
 
