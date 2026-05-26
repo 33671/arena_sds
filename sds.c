@@ -187,6 +187,11 @@ sds sdsdup(const sds s) {
     return sdsnewlen(sdsGetArena(s), s, sdslen(s));
 }
 
+/* Duplicate an sds string into a specific arena (cross-arena copy). */
+sds sdsdupTo(Arena *dst, const sds s) {
+    return sdsnewlen(dst, s, sdslen(s));
+}
+
 /* Free an sds string. No operation is performed if 's' is NULL.
  *
  * In arena mode this is a no-op because:

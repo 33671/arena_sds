@@ -20,6 +20,17 @@ int main(void)
         assert(sdslen(s2) == 5);
         assert(strcmp(s2, "hello") == 0);
         printf("[PASS] sdsdup (same arena)\n");
+
+        /* cross-arena dup */
+        {
+            Arena ar2 = {0};
+            sds s3 = sdsdupTo(&ar2, s1);
+            assert(sdslen(s3) == 5);
+            assert(strcmp(s3, "hello") == 0);
+            assert(s3 != s1);  /* different pointer, different arena */
+            arena_free(&ar2);
+            printf("[PASS] sdsdupTo (cross-arena)\n");
+        }
     }
 
     /* 2. sdsempty + sdscat */

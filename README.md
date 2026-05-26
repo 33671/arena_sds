@@ -12,7 +12,8 @@ freed in bulk — there is no per-string free.
 | `sds sdsnew(const char *init)` | `sds sdsnew(Arena *a, const char *init)` |
 | `sds sdsnewlen(const void *init, size_t len)` | `sds sdsnewlen(Arena *a, const void *init, size_t len)` |
 | `sds sdsempty(void)` | `sds sdsempty(Arena *a)` |
-| `sds sdsdup(const sds s)` | `sds sdsdup(const sds s)` — unchanged, duplicates into the same arena |
+| `sds sdsdup(const sds s)` | `sds sdsdup(const sds s)` — duplicates into the same arena |
+| | `sds sdsdupTo(Arena *dst, const sds s)` — **new**: cross-arena copy |
 | `void sdsfree(sds s)` | **removed** — arena frees in bulk via `arena_reset()` / `arena_free()` |
 | `sds sdsfromlonglong(long long v)` | `sds sdsfromlonglong(Arena *a, long long v)` |
 | `sds *sdssplitlen(...)` | `sds *sdssplitlen(Arena *a, ...)` |
@@ -237,18 +238,20 @@ type. You can use the right `printf` specifier instead of casting.
 
 * The `sdsdup()` function duplicates an already existing SDS string into the
   same arena — no explicit Arena argument is needed since the source string
-  already knows its arena:
+  already knows its arena.  Use `sdsdupTo()` to copy into a different arena:
 
     ```c
-    Arena a = {0};
-    sds s1, s2;
+    Arena a = {0}, b = {0};
+    sds s1, s2, s3;
 
     s1 = sdsnew(&a, "Hello");
-    s2 = sdsdup(s1);
-    printf("%s %s\n", s1, s2);
+    s2 = sdsdup(s1);              // s2 lives in arena a
+    s3 = sdsdupTo(&b, s1);       // s3 lives in arena b
+    printf("%s %s %s\n", s1, s2, s3);
     arena_free(&a);
+    arena_free(&b);
 
-    output> Hello Hello
+    output> Hello Hello Hello
     ```
 
 Obtaining the string length

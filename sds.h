@@ -231,6 +231,7 @@ sds sdsnewlen(Arena *a, const void *init, size_t initlen);
 sds sdsnew(Arena *a, const char *init);
 sds sdsempty(Arena *a);
 sds sdsdup(const sds s);
+sds sdsdupTo(Arena *dst, const sds s);
 sds sdsgrowzero(sds s, size_t len);
 sds sdscatlen(sds s, const void *t, size_t len);
 sds sdscat(sds s, const char *t);
