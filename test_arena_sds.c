@@ -257,6 +257,32 @@ int main(void)
         arena_free(&ar);
     }
 
+    /* 19b. arena_realloc: last-alloc but exceeds region capacity → alloc+copy */
+    {
+        Arena ar = {0};
+        unsigned char pattern = 0xAB;
+
+        /* Default region capacity is 8192 words (64KB on 64-bit).
+         * 60000 bytes → 7500 words.  Realloc to 70000 bytes → 8750
+         * words, which exceeds 8192, forcing alloc+copy. */
+        size_t old_sz = 60000;
+        void *p1 = arena_alloc(&ar, old_sz);
+        assert(p1 != NULL);
+        memset(p1, pattern, old_sz);
+
+        void *p2 = arena_realloc(&ar, p1, old_sz, 70000);
+        assert(p2 != NULL);
+        assert(p2 != p1);  /* different pointer: new region allocated */
+
+        /* Verify old data was copied correctly */
+        unsigned char *pc = (unsigned char *)p2;
+        for (size_t i = 0; i < old_sz; i++)
+            assert(pc[i] == pattern);
+
+        arena_free(&ar);
+        printf("[PASS] arena_realloc last-alloc exceeds capacity → alloc+copy\n");
+    }
+
     /* ── Tests for _arena cross-type write fix ─────────────────── */
     /* These verify that sdsMakeRoomFor() and sdsRemoveFreeSpace()
      * write the _arena pointer at the correct offset for the
