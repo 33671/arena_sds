@@ -13,6 +13,7 @@ freed in bulk — there is no per-string free.
 | `sds sdsnewlen(const void *init, size_t len)` | `sds sdsnewlen(Arena *a, const void *init, size_t len)` |
 | `sds sdsempty(void)` | `sds sdsempty(Arena *a)` |
 | `sds sdsdup(const sds s)` | `sds sdsdup(const sds s)` — unchanged, duplicates into the same arena |
+| `void sdsfree(sds s)` | **removed** — arena frees in bulk via `arena_reset()` / `arena_free()` |
 | `sds sdsfromlonglong(long long v)` | `sds sdsfromlonglong(Arena *a, long long v)` |
 | `sds *sdssplitlen(...)` | `sds *sdssplitlen(Arena *a, ...)` |
 | `sds *sdssplitargs(...)` | `sds *sdssplitargs(Arena *a, ...)` |
