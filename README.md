@@ -1,13 +1,64 @@
-Simple Dynamic Strings
+Simple Dynamic Strings (Arena fork)
 ===
+
+This is a fork of SDS that replaces `malloc`/`realloc`/`free` with an
+**arena (bump) allocator**. All SDS strings live inside an `Arena` and are
+freed in bulk — there is no per-string free.
+
+**Differences from upstream SDS:**
+
+| Original SDS | This fork |
+|---|---|
+| `sds sdsnew(const char *init)` | `sds sdsnew(Arena *a, const char *init)` |
+| `sds sdsnewlen(const void *init, size_t len)` | `sds sdsnewlen(Arena *a, const void *init, size_t len)` |
+| `sds sdsempty(void)` | `sds sdsempty(Arena *a)` |
+| `sds sdsdup(const sds s)` | `sds sdsdup(const sds s)` — unchanged, duplicates into the same arena |
+| `void sdsfree(sds s)` | **no-op** — arena doesn't support individual free |
+| `sds sdsfromlonglong(long long v)` | `sds sdsfromlonglong(Arena *a, long long v)` |
+| `sds *sdssplitlen(...)` | `sds *sdssplitlen(Arena *a, ...)` |
+| `sds *sdssplitargs(...)` | `sds *sdssplitargs(Arena *a, ...)` |
+| `sds sdsjoin(...)` / `sds sdsjoinsds(...)` | take `Arena *a` as first argument |
+
+All other functions (`sdscat`, `sdscpy`, `sdstrim`, `sdsrange`, `sdscmp`,
+`sdscatfmt`, `sdscatprintf`, `sdsMakeRoomFor`, `sdsRemoveFreeSpace`, …)
+are **unchanged** — they read the arena pointer from the string's header.
+
+**Arena lifecycle:**
+
+```c
+Arena a = {0};                  // create an empty arena
+
+sds s1 = sdsnew(&a, "hello");   // allocate inside a
+sds s2 = sdsnew(&a, "world");
+s1 = sdscat(s1, "!!!");        // may realloc inside a (abandoning old block)
+
+// ... use s1, s2 freely ...
+
+arena_reset(&a);                // free everything, reuse memory for next batch
+//  — or —
+arena_free(&a);                 // free everything, release all memory
+```
+
+Key points:
+- An `Arena` is a bump allocator: allocations are laid out contiguously in
+  64 KB *Regions*. Freeing individual strings is impossible by design —
+  `sdsfree()` is a no-op.
+- `arena_reset()` rewinds the arena to empty while keeping allocated Regions,
+  so the next batch of strings reuses the same memory.
+- `arena_free()` releases all Regions back to the OS.
+- The intended usage pattern is **batch-reclaim**: allocate many short-lived
+  strings during a request/parse/pass, then `arena_reset()` once when done.
+- Multiple `Arena` instances can coexist (e.g., one per thread or per request).
+- Temporary buffers inside `sdscatvprintf` use raw `malloc`/`free` to avoid
+  polluting the arena.
 
 **Notes about version 2**: this is an updated version of SDS in an attempt
 to finally unify Redis, Disque, Hiredis, and the stand alone SDS versions.
-This version is **NOT* binary compatible** with SDS verison 1, but the API
-is 99% compatible so switching to the new lib should be trivial.
+It is **NOT binary compatible** with SDS version 1, but the API is 99%
+compatible so switching to the new lib should be trivial.
 
-Note that this version of SDS may be a slower with certain workloads, but
-uses less memory compared to V1 since header size is dynamic and depends to
+Note that this version of SDS may be slower with certain workloads, but
+uses less memory compared to V1 since header size is dynamic and depends on
 the string to alloc.
 
 Moreover it includes a few more API functions, notably `sdscatfmt` which
@@ -127,26 +178,27 @@ program holds an SDS string and not a C string, however this is not mandatory.
 This is the simplest SDS program you can write that does something:
 
 ```c
-sds mystring = sdsnew("Hello World!");
+Arena a = {0};
+sds mystring = sdsnew(&a, "Hello World!");
 printf("%s\n", mystring);
-sdsfree(mystring);
+arena_free(&a);
 
 output> Hello World!
 ```
 
 The above small program already shows a few important things about SDS:
 
-* SDS strings are created, and heap allocated, via the `sdsnew()` function, or other similar functions that we'll see in a moment.
+* SDS strings are created via the `sdsnew()` function (which takes an `Arena*`), or other similar functions that we'll see in a moment.
 * SDS strings can be passed to `printf()` like any other C string.
-* SDS strings require to be freed with `sdsfree()`, since they are heap allocated.
+* SDS strings are freed in bulk via `arena_reset()` or `arena_free()` — `sdsfree()` is a no-op in this fork.
 
 Creating SDS strings
 ---
 
 ```c
-sds sdsnewlen(const void *init, size_t initlen);
-sds sdsnew(const char *init);
-sds sdsempty(void);
+sds sdsnewlen(Arena *a, const void *init, size_t initlen);
+sds sdsnew(Arena *a, const char *init);
+sds sdsempty(Arena *a);
 sds sdsdup(const sds s);
 ```
 
@@ -156,14 +208,16 @@ There are many ways to create SDS strings:
 * The `sdsnewlen` function is similar to `sdsnew` but instead of creating the string assuming that the input string is null terminated, it gets an additional length parameter. This way you can create a string using binary data:
 
     ```c
+    Arena a = {0};
     char buf[3];
     sds mystring;
 
     buf[0] = 'A';
     buf[1] = 'B';
     buf[2] = 'C';
-    mystring = sdsnewlen(buf,3);
+    mystring = sdsnewlen(&a, buf, 3);
     printf("%s of len %d\n", mystring, (int) sdslen(mystring));
+    arena_free(&a);
 
     output> ABC of len 3
     ```
@@ -174,20 +228,26 @@ type. You can use the right `printf` specifier instead of casting.
 * The `sdsempty()` function creates an empty zero-length string:
 
     ```c
-    sds mystring = sdsempty();
+    Arena a = {0};
+    sds mystring = sdsempty(&a);
     printf("%d\n", (int) sdslen(mystring));
+    arena_free(&a);
 
     output> 0
     ```
 
-* The `sdsdup()` function duplicates an already existing SDS string:
+* The `sdsdup()` function duplicates an already existing SDS string into the
+  same arena — no explicit Arena argument is needed since the source string
+  already knows its arena:
 
     ```c
+    Arena a = {0};
     sds s1, s2;
 
-    s1 = sdsnew("Hello");
+    s1 = sdsnew(&a, "Hello");
     s2 = sdsdup(s1);
     printf("%s %s\n", s1, s2);
+    arena_free(&a);
 
     output> Hello Hello
     ```
@@ -228,17 +288,12 @@ Destroying strings
 void sdsfree(sds s);
 ```
 
-The destroy an SDS string there is just to call `sdsfree` with the string
-pointer. Note that even empty strings created with `sdsempty` need to be
-destroyed as well otherwise they'll result into a memory leak.
+In this fork `sdsfree` is a **no-op**: the arena allocator cannot free
+individual strings out of order. All strings in an arena are freed in bulk
+by `arena_reset()` or `arena_free()`.
 
-The function `sdsfree` does not perform any operation if instead of an SDS
-string pointer, `NULL` is passed, so you don't need to check for `NULL` explicitly before calling it:
-
-```c
-if (string) sdsfree(string); /* Not needed. */
-sdsfree(string); /* Same effect but simpler. */
-```
+The function still exists for API compatibility and safely does nothing when
+called (including when `NULL` is passed).
 
 Concatenating strings
 ---
@@ -257,10 +312,12 @@ identical, the only difference being that `sdscat` does not have an explicit
 length argument since it expects a null terminated string.
 
 ```c
-sds s = sdsempty();
+Arena a = {0};
+sds s = sdsempty(&a);
 s = sdscat(s, "Hello ");
 s = sdscat(s, "World!");
 printf("%s\n", s);
+arena_free(&a);
 
 output> Hello World!
 ```
@@ -277,11 +334,12 @@ sds sdscatsds(sds s, const sds t);
 Usage is straightforward:
 
 ```c
-sds s1 = sdsnew("aaa");
-sds s2 = sdsnew("bbb");
+Arena a = {0};
+sds s1 = sdsnew(&a, "aaa");
+sds s2 = sdsnew(&a, "bbb");
 s1 = sdscatsds(s1,s2);
-sdsfree(s2);
 printf("%s\n", s1);
+arena_free(&a);
 
 output> aaabbb
 ```
@@ -299,7 +357,8 @@ already `len` bytes, otherwise it will enlarge the string to `len` just padding
 it with zero bytes.
 
 ```c
-sds s = sdsnew("Hello");
+Arena a = {0};
+sds s = sdsnew(&a, "Hello");
 s = sdsgrowzero(s,6);
 s[5] = '!'; /* We are sure this is safe because of sdsgrowzero() */
 printf("%s\n', s);
@@ -320,9 +379,10 @@ sds sdscatprintf(sds s, const char *fmt, ...) {
 Example:
 
 ```c
+Arena a = {0};
 sds s;
 int a = 10, b = 20;
-s = sdsnew("The sum is: ");
+s = sdsnew(&a, "The sum is: ");
 s = sdscatprintf(s,"%d+%d = %d",a,b,a+b);
 ```
 
@@ -332,17 +392,18 @@ you need is to concatenate your string to an empty string:
 
 
 ```c
+Arena a = {0};
 char *name = "Anna";
 int loc = 2500;
 sds s;
-s = sdscatprintf(sdsempty(), "%s wrote %d lines of LISP\n", name, loc);
+s = sdscatprintf(sdsempty(&a), "%s wrote %d lines of LISP\n", name, loc);
 ```
 
 You can use `sdscatprintf` in order to convert numbers into SDS strings:
 
 ```c
 int some_integer = 100;
-sds num = sdscatprintf(sdsempty(),"%d\n", some_integer);
+sds num = sdscatprintf(sdsempty(&a), "%d\n", some_integer);
 ```
 
 However this is slow and we have a special function to make it efficient.
@@ -355,14 +416,16 @@ kind of programs, and while you may do this with `sdscatprintf` the performance
 hit is big, so SDS provides a specialized function.
 
 ```c
-sds sdsfromlonglong(long long value);
+sds sdsfromlonglong(Arena *a, long long value);
 ```
 
 Use it like this:
 
 ```c
-sds s = sdsfromlonglong(10000);
+Arena a = {0};
+sds s = sdsfromlonglong(&a, 10000);
 printf("%d\n", (int) sdslen(s));
+arena_free(&a);
 
 output> 5
 ```
@@ -393,7 +456,8 @@ This is an example of string trimming where newlines and spaces are removed
 from an SDS strings:
 
 ```c
-sds s = sdsnew("         my string\n\n  ");
+Arena a = {0};
+sds s = sdsnew(&a, "         my string\n\n  ");
 sdstrim(s," \n");
 printf("-%s-\n",s);
 
@@ -411,7 +475,8 @@ to indexes, representing the start and the end as specified by zero-based
 indexes inside the string, to obtain the range that will be retained.
 
 ```c
-sds s = sdsnew("Hello World!");
+Arena a = {0};
+sds s = sdsnew(&a, "Hello World!");
 sdsrange(s,1,4);
 printf("-%s-\n");
 
@@ -422,7 +487,8 @@ Indexes can be negative to specify a position starting from the end of the
 string, so that `-1` means the last character, `-2` the penultimate, and so forth:
 
 ```c
-sds s = sdsnew("Hello World!");
+Arena a = {0};
+sds s = sdsnew(&a, "Hello World!");
 sdsrange(s,6,-1);
 printf("-%s-\n");
 sdsrange(s,0,-2);
@@ -483,7 +549,8 @@ sds sdscpy(sds s, const char *t);
 The string copy function of SDS is called `sdscpylen` and works like that:
 
 ```c
-s = sdsnew("Hello World!");
+Arena a = {0};
+s = sdsnew(&a, "Hello World!");
 s = sdscpylen(s,"Hello Superman!",15);
 ```
 
@@ -539,8 +606,9 @@ use it with SDS strings, normal C strings by using strlen() as `len` argument,
 or binary data. The following is an example usage:
 
 ```c
-sds s1 = sdsnew("abcd");
-sds s2 = sdsempty();
+Arena a = {0};
+sds s1 = sdsnew(&a, "abcd");
+sds s2 = sdsempty(&a);
 s[1] = 1;
 s[2] = 2;
 s[3] = '\n';
@@ -583,7 +651,7 @@ strings it is composed of, so SDS provides a function that returns an
 array of SDS strings given a string and a separator.
 
 ```c
-sds *sdssplitlen(const char *s, int len, const char *sep, int seplen, int *count);
+sds *sdssplitlen(Arena *a, const char *s, int len, const char *sep, int seplen, int *count);
 void sdsfreesplitres(sds *tokens, int count);
 ```
 
@@ -593,28 +661,30 @@ other two arguments `sep` and `seplen` the separator to use during the
 tokenization. The final argument `count` is a pointer to an integer that will
 be set to the number of tokens (sub strings) returned.
 
-The return value is a heap allocated array of SDS strings.
+The return value is a heap allocated array of SDS strings (allocated in the
+given arena).
 
 ```c
+Arena a = {0};
 sds *tokens;
 int count, j;
 
-sds line = sdsnew("Hello World!");
-tokens = sdssplitlen(line,sdslen(line)," ",1,&count);
+sds line = sdsnew(&a, "Hello World!");
+tokens = sdssplitlen(&a, line, sdslen(line), " ", 1, &count);
 
 for (j = 0; j < count; j++)
     printf("%s\n", tokens[j]);
-sdsfreesplitres(tokens,count);
+sdsfreesplitres(tokens, count);
+arena_free(&a);
 
 output> Hello
 output> World!
 ```
 
-The returned array is heap allocated, and the single elements of the array
-are normal SDS strings. You can free everything calling `sdsfreesplitres`
-as in the example. Alternativey you are free to release the array yourself
-using the `free` function and use and/or free the individual SDS strings
-as usually.
+The returned array is heap allocated (in the given arena), and the single
+elements of the array are normal SDS strings. You can free everything by
+calling `sdsfreesplitres` as in the example, or simply reset/free the arena
+when done.
 
 A valid approach is to set the array elements you reused in some way to
 `NULL`, and use `sdsfreesplitres` to free all the rest.
@@ -631,7 +701,7 @@ arguments provided by the user via the keyboard in an interactive manner, or
 via a file, network, or any other mean, into tokens.
 
 ```c
-sds *sdssplitargs(const char *line, int *argc);
+sds *sdssplitargs(Arena *a, const char *line, int *argc);
 ```
 
 The `sdssplitargs` function returns an array of SDS strings exactly like
@@ -662,8 +732,8 @@ There are two functions doing the reverse of tokenization by joining strings
 into a single one.
 
 ```c
-sds sdsjoin(char **argv, int argc, char *sep, size_t seplen);
-sds sdsjoinsds(sds *argv, int argc, const char *sep, size_t seplen);
+sds sdsjoin(Arena *a, char **argv, int argc, char *sep, size_t seplen);
+sds sdsjoinsds(Arena *a, sds *argv, int argc, const char *sep, size_t seplen);
 ```
 
 The two functions take as input an array of strings of length `argc` and
@@ -676,9 +746,11 @@ in the array to be SDS strings. However because of this only `sdsjoinsds` is
 able to deal with binary data.
 
 ```c
+Arena a = {0};
 char *tokens[3] = {"foo","bar","zap"};
-sds s = sdsjoin(tokens,3,"|",1);
+sds s = sdsjoin(&a, tokens, 3, "|", 1);
 printf("%s\n", s);
+arena_free(&a);
 
 output> foo|bar|zap
 ```
@@ -738,7 +810,8 @@ just hold the header, string, and null term. However other access patterns
 will create extra free space at the end, like in the following program:
 
 ```c
-s = sdsempty();
+Arena a = {0};
+s = sdsempty(&a);
 s = sdscat(s,"foo");
 s = sdscat(s,"bar");
 s = sdscat(s,"123");
@@ -781,7 +854,8 @@ There is also a function that can be used in order to get the size of the
 total allocation for a given string, and is called `sdsAllocSize`.
 
 ```c
-sds s = sdsnew("Ladies and gentlemen");
+Arena a = {0};
+sds s = sdsnew(&a, "Ladies and gentlemen");
 s = sdscat(s,"... welcome to the C language.");
 printf("%d\n", (int) sdsAllocSize(s));
 s = sdsRemoveFreeSpace(s);
@@ -807,7 +881,8 @@ The function `sdsupdatelen` does just that, updating the internal length
 information for the specified string to the length obtained via `strlen`.
 
 ```c
-sds s = sdsnew("foobar");
+Arena a = {0};
+sds s = sdsnew(&a, "foobar");
 s[2] = '\0';
 printf("%d\n", sdslen(s));
 sdsupdatelen(s);
